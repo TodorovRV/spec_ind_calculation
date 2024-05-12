@@ -1,0 +1,175 @@
+! final_clean_rms -- revised version of old 'final_clean' script
+! UPDATED by YYK in 2020
+!
+! Version: 2020_07_21 (YYK)
+! Change Log:
+!    2020_07_21 - added the while-cycle re-evaluating the target-rms value which does depend on the CLEAN model
+!    2020_06_21 - replace imstat(noise) to calculate target_rms by imstat(rms) far from the phase center since imstat(noise) does not work for wrong uvf weights
+!    2011_05_09 - limit maximum clean iter in natural clean to 500
+!
+! Script revised -- May 2011 by D. Homan to improve stopping
+! criteria and not overclean images.   See 'deep_map_residual'
+! macro below for how this works in detail.  The idea is to
+! compare the residual map rms in the frame to a target RMS which
+! is either calculated from the calibrated weights in the image or
+! from the residual in the unclead V map and stop when the 
+! in_frame rms is less than the target value.
+!
+! The final in frame rms in the restored map 
+! should then be reasonably close to the target value; however,
+! test show there is still typically a ~10% reduction in the
+! restored map in_frame rms (in a corner) compared to the
+! the far frame rms, so it is still advisable to use the
+! far frame rms for uncertainty calculations, etc.  The
+! exception to this is the rare source where the cleaning
+! is stopped by the second criteria which is no improvement
+! in the in_frame rms. In that case, it is probably best to
+! use the largest of the in_frame and far_frame rms values in
+! the restored map for uncertainty calculations, contouring, etc...
+!
+! Notes for the original version of the script below.
+!-------------------------------------------------------------
+! final_clean -- script for making deeply cleaned images
+!                by Dan Homan,  dhoman@nrao.edu
+!
+! This started out as the automatic calibration and mapping
+! script by Taylor and Shepard, but I have turned it into
+! a multi-resolution cleaning script for producing "final"
+! deeply cleaned images in difmap.  No self-calibration
+! is performed by this procedure... its' only purpose is
+! to perform a deep multi-resolution clean on calibrated data.
+!
+! The motivation for this procedure comes from tests
+! run by George Moellenbrock which showed that 'super-resolving'
+! the highest brightness temperature features early on in
+! the cleaning process often lead to a much more accurate
+! clean of the lower surface brightness features in later
+! clean iterations at lower resolution.  'super-resolving'
+! in the early rounds seemed to avoid unrecoverable errors
+! in cleaning the most compact VLBI structures.
+! (Moellenbrock, Ph.D. Thesis (1999))
+!
+! During the self-calibration process, I usually implement
+! George's ideas with carefully controlled 'super-resolution'
+! or by modelfitting of the VLBI cores.  For making final, deep
+! cleaned images I created this automated (reproducable)
+! procedure.
+!
+! To run it: load the data, set your mapsize, then just type
+!
+! 0> @final_clean i
+!
+! Where "i" can be replaced by another Stokes parameter.
+! Any exisiting clean components are automatically deleted, 
+! uvtapers are removed, and clean windows are deleted.  
+! Of course, you can change this by editing the script.
+!
+! The lowest resolution used is simply 'natural
+! weighting' of "uvweight 0,-2".  Convolving with
+! the same beam as this lowest resolution is probably
+! the safest thing to do.  As 'natural weighting' is
+! is the last weighting used by the procedure, the
+! model will be automatically convolved with 
+! this beam unless a specific change of beam or
+! resolution is made first.
+!
+! The procedure just cleans, so you must write the
+! FITS image out of difmap yourself...
+!
+! 0> wmap filename
+! 
+! Of course the model components (clean components) can
+! be saved separately if desired...
+!
+! 0> wmod filename.mod
+!
+
+uvrange 14.776661, 230.997664
+integer clean_niter; 
+integer max_deep_clean_cycles; max_deep_clean_cycles = 20
+float overclean_coef; overclean_coef = 1.0
+float clean_gain; clean_gain = 0.03
+float dynam;
+float flux_peak;
+
+! Define the inner loop as a macro.
+
+float flux_cutoff
+float dyn_range
+float last_in_rms
+float in_rms
+float target_rms
+
+#+map_residual \
+flux_peak = peak(flux);\
+flux_cutoff = imstat(rms) * dynam;\
+while(abs(flux_peak)>flux_cutoff);\
+ clean clean_niter,clean_gain;\
+ flux_cutoff = imstat(rms) * dynam;\
+ flux_peak = peak(flux);\
+end while
+
+! The following macro stops
+! when the the in_frame RMS matches the
+! the V RMS OR if there is not improvement 
+! in the in_frame RMS
+
+#+deep_map_residual \
+in_rms = imstat(rms);\
+print "Target RMS: ", target_rms, "  In Frame RMS: ", in_rms;\
+while(in_rms > target_rms);\
+ clean min(100*(in_rms/target_rms),500),clean_gain;\
+ last_in_rms = in_rms;\
+ in_rms = imstat(rms);\
+ print "Target RMS: ", target_rms, "  In Frame RMS: ", in_rms;\
+ if(last_in_rms <= in_rms);\
+  in_rms = target_rms;\
+ end if;\
+end while
+
+! select the stokes to clean
+select %1
+
+! clear previous model
+clrmod true,true,true
+
+! delete any windows
+delwin
+
+! remove any tapering
+uvtaper 0
+
+print "*********** FIRST TRY SUPER-UNIFORM WEIGHTING **********"
+print "**** -- only if dynamic range is higher than 10 -- *****"
+
+dynam = 10
+clean_niter = 10
+!uvw 20,-1
+!map_residual
+uvw 10,-1
+map_residual
+clean_niter = 50
+
+print "*********** REGULAR UNIFORM WEIGHTING NEXT ***************"
+uvw 2,-1
+dynam = 6
+map_residual
+print "********** DEEP CLEANING AT NATURAL WEIGHTING **************"
+uvw 0,-2
+! now let clean go deep
+shift 10000,10000; target_rms = imstat(rms)/overclean_coef; unshift
+i=1
+while (target_rms < imstat(rms))
+  deep_map_residual
+  shift 10000,10000; target_rms = imstat(rms)/overclean_coef; unshift; i=i+1
+  if (i>max_deep_clean_cycles)
+    break 
+  end if
+end while
+
+! clean 1 component just to have something to restore
+clean 1, clean_gain
+in_rms = imstat(rms)
+print "********** FINAL CLEAN IS FINISHED **************"
+print "Target RMS was: ", target_rms, " Reached RMS: ", in_rms
+print "*************************************************"
